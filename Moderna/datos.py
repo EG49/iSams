@@ -6,9 +6,8 @@ de aquí, no debe tener rutas ni listas "quemadas" adentro.
 """
  
 # --- Navegador ---
-CHROME_PATH = r"C:\Users\egaib\Desktop\Documentos Evans\Documentos Evans\Scripts\chrome-win64\chrome.exe" 
-DRIVER_PATH = r"C:\Users\egaib\Desktop\Documentos Evans\Documentos Evans\Scripts\chromedriver-win64\chromedriver.exe" # ej: r"C:\ruta\chromedriver.exe" (None = Selenium Manager lo resuelve solo)
- 
+CHROME_PATH = r"C:\Users\egaib\Desktop\Programación\iSams\chrome-win64\chrome.exe"
+DRIVER_PATH = r"C:\Users\egaib\Desktop\Programación\iSams\chromedriver-win64\chromedriver.exe"
 # --- iSAMS ---
 LOGIN_URL = "https://lamoderna.isamshosting.cloud/"
  
