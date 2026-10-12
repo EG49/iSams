@@ -5,11 +5,13 @@ Lee la hoja de la carpeta (ej. 'TI') de lectura_{promocion}.xlsx y calcula, para
 cada materia, las fórmulas del trimestre. Todo queda en formulas_{promocion}.xlsx
 para REVISARLO antes de escribirlo en iSAMS:
 
-  SUMAINST = FLOOR((SUM(([ID insumo1]*0.20),([ID insumo2]*0.20),...)),0.01)   (los % deben sumar 100)
-  CALINST  = FLOOR(([ID SUMAINST]*0.70),0.01)
+  SUMAINST = FLOOR((SUM(({ACTCT1}*0.20),({DEBT1}*0.20),...)),0.01)   (los % deben sumar 100)
+  CALINST  = FLOOR(({SUMAINST1}*0.70),0.01)
   EXAT     = no se toca (nota plana)
-  CALEXAT  = FLOOR(([ID EXAT]*0.30),0.01)
-  PROMTRI  = FLOOR(([ID CALEXAT]+[ID CALINST]),0.01)
+  CALEXAT  = FLOOR(({EXAT1}*0.30),0.01)
+  PROMTRI  = FLOOR(({CALEXAT1}+{CALINST1}),0.01)
+{NOMBRE} es un marcador: al escribir en iSAMS se reemplaza por [ID<id real>] leído de la pestaña
+'Columns' (los ids del árbol de estructura NO sirven: son números de fila que iSAMS reasigna).
 FLOOR(x,0.01) trunca a centésimas (misma convención que las fórmulas actuales).
 
 Las filas se listan en el orden en que hay que escribirlas (cada una depende de la anterior).
@@ -52,8 +54,9 @@ def _floor(expresion):
     return f"FLOOR(({expresion}),{FLOOR_SIGNIFICANCIA})"
 
 
-def _ref(fila_id):
-    return f"[ID{fila_id}]"
+def _ref(titulo):
+    """Marcador {NOMBRE}: al escribir en iSAMS se reemplaza por [ID<id real de la columna>]."""
+    return "{" + titulo + "}"
 
 
 def _buscar(filas, prefijo):
@@ -97,12 +100,12 @@ def formulas_de_materia(filas):
     if abs(p_ins + p_exa - 100) > 1e-9:
         return [], f"el % de insumos ({p_ins}) + el % del examen ({p_exa}) no suma 100"
 
-    terminos = ",".join(f"({_ref(f['fila_id'])}*{_factor(f['porcentaje'])})" for f in insumos)
+    terminos = ",".join(f"({_ref(f['titulo'])}*{_factor(f['porcentaje'])})" for f in insumos)
     return [
         (suma, _floor(f"SUM({terminos})"), f"{len(insumos)} insumos, {total:g}%", insumos),
-        (cal_ins, _floor(f"{_ref(suma['fila_id'])}*{_factor(p_ins)}"), f"{suma['titulo']} x {p_ins:g}%", [suma]),
-        (cal_exa, _floor(f"{_ref(examen['fila_id'])}*{_factor(p_exa)}"), f"{examen['titulo']} x {p_exa:g}%", [examen]),
-        (prom, _floor(f"{_ref(cal_exa['fila_id'])}+{_ref(cal_ins['fila_id'])}"), "examen + insumos, sobre 10", [cal_exa, cal_ins]),
+        (cal_ins, _floor(f"{_ref(suma['titulo'])}*{_factor(p_ins)}"), f"{suma['titulo']} x {p_ins:g}%", [suma]),
+        (cal_exa, _floor(f"{_ref(examen['titulo'])}*{_factor(p_exa)}"), f"{examen['titulo']} x {p_exa:g}%", [examen]),
+        (prom, _floor(f"{_ref(cal_exa['titulo'])}+{_ref(cal_ins['titulo'])}"), "examen + insumos, sobre 10", [cal_exa, cal_ins]),
     ], None
 
 
@@ -127,7 +130,7 @@ def main():
     out = openpyxl.Workbook()
     ws = out.active
     ws.title = "formulas"
-    ws.append(["grado", "materia", "id_gradebook", "orden", "fila_destino_id", "fila_destino", "formula", "nota", "referencias"])
+    ws.append(["grado", "materia", "id_gradebook", "carpeta", "orden", "fila_destino", "formula", "nota", "referencias"])
     wp = out.create_sheet("problemas")
     wp.append(["grado", "materia", "id_gradebook", "problema"])
 
@@ -140,8 +143,8 @@ def main():
             continue
         ok += 1
         for orden, (f, formula, nota, refs) in enumerate(formulas, 1):
-            referencias = ";".join(f"{r['fila_id']}={r['titulo']}" for r in refs)
-            ws.append([grado, materia, id_gb, orden, f["fila_id"], f["titulo"], formula, nota, referencias])
+            referencias = ";".join(r["titulo"] for r in refs)
+            ws.append([grado, materia, id_gb, CARPETA_A_LEER, orden, f["titulo"], formula, nota, referencias])
 
     ws.freeze_panes = "A2"
     wp.freeze_panes = "A2"

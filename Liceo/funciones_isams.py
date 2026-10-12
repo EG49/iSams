@@ -706,21 +706,44 @@ def recolectar_ids_columnas(driver, nombre_columna, tiempo_espera=60):
     return [id_attr[2:] for id_attr in ids_encontrados.keys()]  # sin el prefijo "ID"
 
 
-def escribir_formula(driver, formula_texto, tiempo_espera=20):
-    """Escribe (reemplazando el contenido) la fórmula en el textarea del
-    Formula Builder, disparando los eventos que la app espera."""
-    form = elemento_profundo(driver, "isams-data-form#customFormulaForm", tiempo_espera)
-    contenedor_textarea = dentro_de_shadow(driver, form, "isams-textarea#customFormula", tiempo_espera)
-    textarea = dentro_de_shadow(driver, contenedor_textarea, "textarea#input", tiempo_espera)
-    driver.execute_script(
-        """
-        const ta = arguments[0];
-        ta.value = arguments[1];
-        ta.dispatchEvent(new Event('input', {bubbles: true}));
-        ta.dispatchEvent(new Event('change', {bubbles: true}));
-        """,
-        textarea, formula_texto,
-    )
+_JS_ESCRIBIR_FORMULA = """
+// Busca (atravesando shadow roots) los isams-textarea#customFormula, descarta los que no están
+// visibles (diálogos viejos que Kendo deja ocultos en el DOM) y escribe en el textarea del visible.
+function recolectar(root, selector, resultados) {
+    resultados.push(...root.querySelectorAll(selector));
+    for (const nodo of root.querySelectorAll('*')) {
+        if (nodo.shadowRoot) recolectar(nodo.shadowRoot, selector, resultados);
+    }
+}
+const candidatos = [];
+recolectar(document, 'isams-textarea#customFormula', candidatos);
+for (const el of candidatos) {
+    if (el.offsetParent === null && el.getClientRects().length === 0) continue;
+    const ta = el.shadowRoot ? el.shadowRoot.querySelector('textarea#input') : null;
+    if (!ta) continue;
+    ta.value = arguments[0];
+    ta.dispatchEvent(new Event('input', {bubbles: true}));
+    ta.dispatchEvent(new Event('change', {bubbles: true}));
+    return ta.value;
+}
+return null;
+"""
+
+
+def escribir_formula(driver, formula_texto, tiempo_espera=30):
+    """Escribe (reemplazando el contenido) la fórmula en el textarea del Formula Builder
+    del wizard ACTUAL. Reintenta hasta que aparezca el textarea VISIBLE: tras abrir un
+    2.º/3.er wizard seguido, el formulario del anterior sigue en el DOM (oculto), y tomar
+    el primero que aparece escribía en el equivocado o no encontraba el textarea."""
+    fin = time.time() + tiempo_espera
+    while time.time() < fin:
+        valor = driver.execute_script(_JS_ESCRIBIR_FORMULA, formula_texto)
+        if valor is not None:
+            if valor != formula_texto:
+                raise RuntimeError("la fórmula escrita en el textarea no coincide con la esperada")
+            return
+        time.sleep(0.4)
+    raise TimeoutError("No se encontró el textarea visible del Formula Builder (isams-textarea#customFormula).")
 
 
 def guardar_wizard_calculo(driver, tiempo_espera=20):
@@ -735,3 +758,77 @@ def guardar_wizard_calculo(driver, tiempo_espera=20):
     time.sleep(0.5)
     clic_boton_wizard(driver, "isams-wizard#calculationWizard", "Finish")
     time.sleep(1)
+
+
+def mapear_columnas(driver, tiempo_espera=60):
+    """Pestaña 'Columns' del wizard (ya abierta): recorre la lista UNA sola vez
+    (virtualizada, con scroll) y devuelve {nombre_normalizado: [ids]} de TODAS las
+    columnas del gradebook, con los ids SIN el prefijo 'ID' (los que van en
+    [ID77590]). Misma lógica de contenedor y espera que recolectar_ids_columnas."""
+    wizard = elemento_profundo(driver, "isams-wizard#calculationWizard", tiempo_espera)
+    contenedor = driver.execute_script(
+        "return arguments[0].querySelector("
+        "\"markbooks-structure-display[id='columnSelection'] isams-pane[id='listitems']\""
+        ");",
+        wizard,
+    )
+    if contenedor is None:
+        raise TimeoutError(
+            "No se encontró la lista de columnas ('listitems' dentro de "
+            "markbooks-structure-display#columnSelection) en el wizard actual."
+        )
+
+    fin_espera_inicial = time.time() + 15
+    while time.time() < fin_espera_inicial:
+        if driver.execute_script(
+                "return arguments[0].querySelectorAll(\"div[id^='ID'], div[id^='GID']\").length > 0;", contenedor):
+            break
+        time.sleep(0.3)
+
+    driver.execute_script("arguments[0].scrollTop = 0;", contenedor)
+    time.sleep(0.3)
+
+    mapa = {}
+    vistos = set()
+    ultimo_top = -1
+    sin_cambio = 0
+    fin = time.time() + tiempo_espera
+    while time.time() < fin:
+        filas = driver.execute_script(
+            """
+            return Array.from(arguments[0].querySelectorAll("div[id^='ID']")).map(function (el) {
+                return [el.getAttribute('id'), el.textContent || ''];
+            });
+            """,
+            contenedor,
+        )
+        for id_attr, texto_completo in filas:
+            if not id_attr or id_attr in vistos:
+                continue
+            vistos.add(id_attr)
+            lineas = [l.strip() for l in texto_completo.split("\n") if l.strip()]
+            nombre = normalizar(lineas[0]) if lineas else ""
+            if nombre:
+                mapa.setdefault(nombre, []).append(id_attr[2:])
+
+        info = driver.execute_script(
+            """
+            const c = arguments[0];
+            const puede = c.scrollHeight > c.clientHeight + 5;
+            if (puede) { c.scrollTop += c.clientHeight * 0.8; }
+            return {top: c.scrollTop, puede: puede};
+            """,
+            contenedor,
+        )
+        if not info["puede"]:
+            time.sleep(0.3)
+            continue
+        if info["top"] == ultimo_top:
+            sin_cambio += 1
+            if sin_cambio >= 3:
+                break
+        else:
+            sin_cambio = 0
+        ultimo_top = info["top"]
+        time.sleep(0.2)
+    return mapa
