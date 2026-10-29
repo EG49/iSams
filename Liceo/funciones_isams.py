@@ -16,7 +16,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
-from datos import CHROME_PATH, DRIVER_PATH, LOGIN_URL
+from datos import CHROME_PATH, DRIVER_PATH, LOGIN_URL, COMPARTIR_CALCULADAS, CLASIFICACION_POR_GRADO, ALIAS_CARPETAS
 
 
 # --- Navegador y sesión ---
@@ -272,15 +272,24 @@ def buscar_elementos_con_scroll(driver, xpath, filtro=None, tiempo_espera=45):
     return []
 
 
+def nombres_carpeta(nombre_carpeta):
+    """Conjunto de nombres normalizados que valen para esa carpeta: ella misma y sus alias (datos.ALIAS_CARPETAS)."""
+    nombres = {normalizar(nombre_carpeta)}
+    for clave, alias in ALIAS_CARPETAS.items():
+        if normalizar(clave) == normalizar(nombre_carpeta):
+            nombres.update(normalizar(a) for a in alias)
+    return nombres
+
+
 def buscar_id_carpeta(driver, nombre_carpeta, tiempo_espera=45):
     """Devuelve el id numérico de la fila-carpeta (tiene el atributo 'group')
     con ese título. Compara de forma insensible a mayúsculas/tildes, y
     scrollea el árbol (virtualizado) si hace falta hasta encontrarla."""
-    objetivo_norm = normalizar(nombre_carpeta)
+    objetivos = nombres_carpeta(nombre_carpeta)
     filas = buscar_elementos_con_scroll(
         driver,
         "//div[contains(@class,'row')][@group]",
-        filtro=lambda f: normalizar(f.get_attribute("title") or "") == objetivo_norm,
+        filtro=lambda f: normalizar(f.get_attribute("title") or "") in objetivos,
         tiempo_espera=tiempo_espera,
     )
     if not filas:
@@ -367,14 +376,13 @@ def analizar_fila(f):
     return corto, maximo, "", porcentaje
 
 
-def columnas_de_carpeta(filas, nombre_carpeta):
-    """De {fila_id: fila} devuelve [(fila_id, titulo, porcentaje)] de las
-    COLUMNAS que están dentro de la carpeta 'nombre_carpeta' (ej. 'TI'), en el
-    orden en que aparecen. Usa el atributo parent; si no hubiera, cae al orden
-    del documento (todo lo que sigue a la carpeta hasta la siguiente carpeta).
-    Devuelve None si la carpeta no existe."""
-    objetivo = normalizar(nombre_carpeta)
-    carpetas = [fid for fid, f in filas.items() if f["carpeta"] and normalizar(f["titulo"]) == objetivo]
+def filas_de_carpeta(filas, nombre_carpeta):
+    """De {fila_id: fila} devuelve [(fila_id, fila_dict)] de las COLUMNAS dentro de la
+    carpeta 'nombre_carpeta' (ej. 'TI'), en orden de aparición. Usa el atributo parent; si no
+    hubiera, cae al orden del documento (todo lo que sigue a la carpeta hasta la siguiente
+    carpeta). Devuelve None si la carpeta no existe."""
+    objetivos = nombres_carpeta(nombre_carpeta)
+    carpetas = [fid for fid, f in filas.items() if f["carpeta"] and normalizar(f["titulo"]) in objetivos]
     if not carpetas:
         return None
     carpeta_id = carpetas[0]
@@ -390,7 +398,15 @@ def columnas_de_carpeta(filas, nombre_carpeta):
                 break
             if dentro:
                 hijas.append(fid)
-    return [(fid, filas[fid]["titulo"], analizar_fila(filas[fid])[3]) for fid in hijas]
+    return [(fid, filas[fid]) for fid in hijas]
+
+
+def columnas_de_carpeta(filas, nombre_carpeta):
+    """[(fila_id, titulo, porcentaje)] de las columnas de la carpeta (None si no existe)."""
+    hijas = filas_de_carpeta(filas, nombre_carpeta)
+    if hijas is None:
+        return None
+    return [(fid, f["titulo"], analizar_fila(f)[3]) for fid, f in hijas]
 
 
 def esperar_filas(driver, tiempo_espera=40):
@@ -551,7 +567,7 @@ def clic_next_wizard_verificado(driver, wizard_selector, tiempo_espera=20):
 
 def configurar_propiedades_calculo(driver, tiempo_espera=20):
     """Step 1 del wizard: Calculation Type = 'Formula Builder',
-    Allow Sharing = 'Not Shared', y avanza al Step 2."""
+    Allow Sharing = COMPARTIR_CALCULADAS (datos.py), y avanza al Step 2."""
     form = elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)
 
     dropdown_calculo = dentro_de_shadow(driver, form, "isams-dropdown#calculation", tiempo_espera)
@@ -560,7 +576,7 @@ def configurar_propiedades_calculo(driver, tiempo_espera=20):
 
     dropdown_compartir = dentro_de_shadow(driver, form, "isams-dropdown#shareable", tiempo_espera)
     select_compartir = dentro_de_shadow(driver, dropdown_compartir, "select#input", tiempo_espera)
-    Select(select_compartir).select_by_visible_text("Not Shared")
+    Select(select_compartir).select_by_visible_text(COMPARTIR_CALCULADAS)
 
     time.sleep(0.5)
     clic_next_wizard_verificado(driver, "isams-wizard#calculationWizard", tiempo_espera)
@@ -832,3 +848,244 @@ def mapear_columnas(driver, tiempo_espera=60):
         ultimo_top = info["top"]
         time.sleep(0.2)
     return mapa
+
+
+# --- Lectura de fórmulas ya existentes (solo lectura: se abre el wizard y se cierra SIN guardar) ---
+
+_JS_LEER_FORMULA = """
+function recolectar(root, selector, resultados) {
+    resultados.push(...root.querySelectorAll(selector));
+    for (const nodo of root.querySelectorAll('*')) {
+        if (nodo.shadowRoot) recolectar(nodo.shadowRoot, selector, resultados);
+    }
+}
+const candidatos = [];
+recolectar(document, 'isams-textarea#customFormula', candidatos);
+for (const el of candidatos) {
+    if (el.offsetParent === null && el.getClientRects().length === 0) continue;
+    const ta = el.shadowRoot ? el.shadowRoot.querySelector('textarea#input') : null;
+    if (ta) return ta.value;
+}
+return null;
+"""
+
+_JS_WIZARD_VISIBLE = """
+function recolectar(root, selector, resultados) {
+    resultados.push(...root.querySelectorAll(selector));
+    for (const nodo of root.querySelectorAll('*')) {
+        if (nodo.shadowRoot) recolectar(nodo.shadowRoot, selector, resultados);
+    }
+}
+const c = [];
+recolectar(document, 'isams-wizard#calculationWizard', c);
+return c.some(function (el) { return el.offsetParent !== null || el.getClientRects().length > 0; });
+"""
+
+
+def leer_formula_actual(driver, tiempo_espera=15):
+    """Texto de la fórmula en el textarea visible del Formula Builder (Step 2). None si no
+    aparece (p. ej. la columna no usa Formula Builder)."""
+    fin = time.time() + tiempo_espera
+    while time.time() < fin:
+        valor = driver.execute_script(_JS_LEER_FORMULA)
+        if valor is not None:
+            return valor
+        time.sleep(0.4)
+    return None
+
+
+def leer_propiedades_paso1(driver, tiempo_espera=10):
+    """(tipo_de_calculo, compartir) tal como están en el Step 1, sin modificarlos."""
+    try:
+        form = elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)
+        textos = []
+        for dropdown in ("isams-dropdown#calculation", "isams-dropdown#shareable"):
+            host = dentro_de_shadow(driver, form, dropdown, tiempo_espera)
+            sel = dentro_de_shadow(driver, host, "select#input", tiempo_espera)
+            textos.append(driver.execute_script(
+                "const o = arguments[0].options[arguments[0].selectedIndex]; return o ? o.text : '';", sel))
+        return textos[0], textos[1]
+    except Exception:
+        return "", ""
+
+
+def cerrar_wizard_sin_guardar(driver):
+    """Cierra el wizard SIN guardar: botón 'Cancel' si existe; si el wizard sigue visible,
+    recarga la página (lo no guardado se descarta). Devuelve True si tuvo que recargar."""
+    try:
+        clic_boton_wizard(driver, "isams-wizard#calculationWizard", "Cancel", tiempo_espera=3)
+    except Exception:
+        pass
+    time.sleep(1)
+    cerrar_alerta_pendiente(driver)  # por si pide confirmar que se descartan cambios
+    time.sleep(0.5)
+    try:
+        sigue = driver.execute_script(_JS_WIZARD_VISIBLE)
+    except UnexpectedAlertPresentException:
+        cerrar_alerta_pendiente(driver)
+        sigue = driver.execute_script(_JS_WIZARD_VISIBLE)
+    if sigue:
+        driver.refresh()
+        time.sleep(3)
+        cerrar_alerta_pendiente(driver)
+        esperar_filas(driver, 25)
+        return True
+    return False
+
+
+# --- Clasificación de materias (ver CLASIFICACION_POR_GRADO en datos.py) ---
+
+_CATEGORIAS_EXACTAS = ("hija", "excluida")
+
+
+def clasificar_materia(grado, materia):
+    """'cuantitativa' (por defecto) | 'cualitativa' | 'hija' | 'madre' | 'manual' | 'excluida'."""
+    grado_n = normalizar(grado)
+    materia_n = normalizar(materia)
+    for prefijos_grado, reglas in CLASIFICACION_POR_GRADO:
+        if not any(grado_n.startswith(normalizar(p)) for p in prefijos_grado):
+            continue
+        for categoria, nombres in reglas.items():
+            for nombre in nombres:
+                nombre_n = normalizar(nombre)
+                if categoria in _CATEGORIAS_EXACTAS:
+                    if materia_n == nombre_n:
+                        return categoria
+                elif materia_n.startswith(nombre_n):
+                    return categoria
+    return "cuantitativa"
+
+
+# ---------------------------------------------------------------------------
+# Creación de columnas calculadas (menú de la barra lateral -> mismo wizard que al editar)
+# ---------------------------------------------------------------------------
+_JS_ITEM_MENU_CALCULADA = """
+const r = arguments[0].shadowRoot;
+if (!r) return null;
+const items = Array.from(r.querySelectorAll('div.options-menu-item'));
+for (const i of items) { if (/calculated/i.test(i.textContent || '')) return i; }
+const grupos = r.querySelectorAll('div.options-menu-group');
+if (grupos.length > 1) { const it = grupos[1].querySelectorAll('div.options-menu-item'); if (it.length > 1) return it[1]; }
+return null;
+"""
+
+_JS_PUBLISHED_NAME = """
+// Busca (en el wizard y todos sus shadow roots) un isams-textbox VISIBLE cuyo id contenga 'publish'.
+const valor = arguments[1];
+function recorrer(raiz) {
+  for (const el of raiz.querySelectorAll('*')) {
+    if (el.tagName === 'ISAMS-TEXTBOX' && /publish/i.test(el.id || '') && el.offsetParent !== null) {
+      const inp = el.shadowRoot && el.shadowRoot.querySelector('input#input');
+      if (inp) return inp;
+    }
+    if (el.shadowRoot) { const r = recorrer(el.shadowRoot); if (r) return r; }
+  }
+  return null;
+}
+const inp = recorrer(arguments[0]);
+if (!inp) return null;
+if (inp.value !== valor) {
+  inp.focus(); inp.value = valor;
+  inp.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+  inp.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+}
+return inp.value;
+"""
+
+_JS_REDONDEO = """
+// Campo numérico de redondeo (no el dropdown): hosts con id que contenga 'round' dentro del form.
+const valor = arguments[1];
+const raiz = arguments[0].shadowRoot;
+if (!raiz) return null;
+for (const el of raiz.querySelectorAll('*')) {
+  if (/round/i.test(el.id || '') && el.tagName !== 'ISAMS-DROPDOWN' && el.shadowRoot) {
+    const inp = el.shadowRoot.querySelector('input#input');
+    if (inp) {
+      inp.focus(); inp.value = valor;
+      inp.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+      inp.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+      return inp.value;
+    }
+  }
+}
+return null;
+"""
+
+
+def abrir_asistente_nueva_columna(driver, tiempo_espera=20):
+    """Menú de la barra lateral (isams-options-menu#sidebarConfig) -> 'Add Calculated Column'."""
+    menu = elemento_profundo(driver, "isams-options-menu#sidebarConfig", tiempo_espera)
+    fin = time.time() + tiempo_espera
+    clic_en_menu = False
+    while time.time() < fin:
+        item = driver.execute_script(_JS_ITEM_MENU_CALCULADA, menu)
+        if item is not None and driver.execute_script("return arguments[0].offsetParent !== null;", item):
+            clic_seguro(driver, item)
+            time.sleep(1.5)
+            elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)
+            return
+        if not clic_en_menu:  # el menú puede estar cerrado: lo abrimos clicando el propio componente
+            clic_seguro(driver, menu)
+            clic_en_menu = True
+        time.sleep(0.4)
+    raise TimeoutError("No se pudo abrir 'Add Calculated Column' en el menú (isams-options-menu#sidebarConfig).")
+
+
+def poner_texto_form(driver, form, id_host, valor, tiempo_espera=20):
+    host = dentro_de_shadow(driver, form, f"isams-textbox#{id_host}", tiempo_espera)
+    inp = dentro_de_shadow(driver, host, "input#input", tiempo_espera)
+    driver.execute_script(
+        "const i=arguments[0]; i.focus(); i.value=arguments[1];"
+        "i.dispatchEvent(new Event('input',{bubbles:true,composed:true}));"
+        "i.dispatchEvent(new Event('change',{bubbles:true,composed:true}));", inp, valor)
+    if (inp.get_attribute("value") or "") != valor:
+        raise RuntimeError(f"no se pudo escribir '{valor}' en {id_host}")
+
+
+def _elegir_en_dropdown(driver, form, id_host, texto, tiempo_espera=20):
+    host = dentro_de_shadow(driver, form, f"isams-dropdown#{id_host}", tiempo_espera)
+    sel = dentro_de_shadow(driver, host, "select#input", tiempo_espera)
+    objetivo = normalizar(texto)
+    for op in sel.find_elements(By.TAG_NAME, "option"):
+        if normalizar(op.get_attribute("textContent") or "") == objetivo:
+            Select(sel).select_by_visible_text(op.text)
+            return
+    raise RuntimeError(f"'{texto}' no es una opción de {id_host}")
+
+
+def rellenar_propiedades_nueva_columna(driver, nombre, nombre_corto, carpeta, redondeo_tipo, redondeo_valor,
+                                       tiempo_espera=20):
+    """Paso 1 del asistente de creación: nombre, short name, carpeta (Position), Formula Builder,
+    redondeo y Allow Sharing (COMPARTIR_CALCULADAS). Termina con Next."""
+    form = elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)
+    poner_texto_form(driver, form, "columnName", nombre, tiempo_espera)
+    poner_texto_form(driver, form, "columnShortName", nombre_corto, tiempo_espera)
+    _elegir_en_dropdown(driver, form, "position", carpeta, tiempo_espera)
+    _elegir_en_dropdown(driver, form, "calculation", "Formula Builder", tiempo_espera)
+    time.sleep(0.5)
+    form = elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)  # puede re-renderizar
+    _elegir_en_dropdown(driver, form, "calculationRoundingType", redondeo_tipo, tiempo_espera)
+    time.sleep(0.5)
+    form = elemento_profundo(driver, "isams-data-form#calculationPropertiesForm", tiempo_espera)
+    valor = driver.execute_script(_JS_REDONDEO, form, redondeo_valor)
+    if valor is None:
+        print("   (aviso: no se encontró el campo numérico de Rounding; se deja el valor por defecto)")
+    _elegir_en_dropdown(driver, form, "shareable", COMPARTIR_CALCULADAS, tiempo_espera)
+    time.sleep(0.5)
+    clic_next_wizard_verificado(driver, "isams-wizard#calculationWizard", tiempo_espera)
+
+
+def terminar_asistente_creacion(driver, nombre_publicado, tiempo_espera=20):
+    """Desde el paso de la fórmula (ya escrita): avanza con Next, rellenando el Published Name con el
+    Short Name en el paso que lo tenga, hasta que aparezca 'Finish', y lo clica."""
+    for _ in range(8):
+        time.sleep(0.5)
+        wizard = elemento_profundo(driver, "isams-wizard#calculationWizard", tiempo_espera)
+        driver.execute_script(_JS_PUBLISHED_NAME, wizard, nombre_publicado)
+        try:
+            clic_boton_wizard(driver, "isams-wizard#calculationWizard", "Finish", tiempo_espera=2)
+            time.sleep(1.5)
+            return
+        except TimeoutError:
+            clic_next_wizard_verificado(driver, "isams-wizard#calculationWizard", tiempo_espera)
+    raise TimeoutError("No apareció el botón 'Finish' del asistente de creación.")
